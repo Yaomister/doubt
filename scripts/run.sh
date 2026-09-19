@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=doubt
-#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
 #SBATCH --gres=gpu:1       
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -8,7 +8,8 @@
 #SBATCH --array=0-4
 #SBATCH --output=logs/%a_%A.out
 
-set -eu
+mkdir -p logs
+
 source /home/yao.eric/doubt/.venv/bin/activate
 
 RUNS=(
