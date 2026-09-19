@@ -9,18 +9,14 @@
 #SBATCH --output=logs/%a_%A.out
 
 set -eu
-source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate doubt   # EDIT
-cd "${SLURM_SUBMIT_DIR:-.}"
-export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 PYTHONUNBUFFERED=1
+source /home/yao.eric/doubt/.venv/bin/activate
 
-EPS=${EPS:-0.05}
 RUNS=(
   "--method baseline"
-  "--method rethink  --epsilon $EPS"
-  "--method rethink  --epsilon $EPS --random"
-  "--method pressure --epsilon $EPS"
-  "--method compare  --epsilon $EPS"
+  "--method rethink  --epsilon 0.05"
+  "--method rethink  --epsilon 0.05 --random"
+  "--method pressure --epsilon 0.05"
+  "--method compare  --epsilon 0.05"
 )
 
-echo "=== ${RUNS[$SLURM_ARRAY_TASK_ID]} on $(hostname)"
 python doubt.py ${RUNS[$SLURM_ARRAY_TASK_ID]}
