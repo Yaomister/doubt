@@ -14,10 +14,10 @@ source /home/yao.eric/doubt/.venv/bin/activate
 
 RUNS=(
   "--method baseline"
-  "--method rethink  --epsilon 0.05"
-  "--method rethink  --epsilon 0.05 --random"
-  "--method pressure --epsilon 0.05"
-  "--method compare  --epsilon 0.05"
+  "--method rethink  --epsilon 0.005"
+  "--method rethink  --epsilon 0.005 --random"
+  "--method pressure --epsilon 0.005"
+  "--method compare  --epsilon 0.005"
 )
 
 python experiment.py ${RUNS[$SLURM_ARRAY_TASK_ID]}

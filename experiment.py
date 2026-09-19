@@ -17,14 +17,15 @@ generation_length = 256
 denoising_steps = 128
 block_size = 32
 MASK_ID = 126336
-carry_weight = 0.5
+carry_weight = 0.05
 
-epsilon = 0.05
+epsilon = 0.005
 delta = None
 norm = 0.0
 
 MODE = "rethink"
 RANDOM = False
+
 
 
 def spearman(a, b):
@@ -39,7 +40,7 @@ def get_args():
     parser.add_argument("--model", required=False, default="GSAI-ML/LLaDA-8B-Instruct")
     parser.add_argument("--method", required=False, default="rethink",
                         choices=["baseline", "rethink", "pressure", "core", "compare"])
-    parser.add_argument("--epsilon", required=False, type=float, default=0.05)
+    parser.add_argument("--epsilon", required=False, type=float, default=0.005)
     parser.add_argument("--random", action="store_true", help="control: undirected push of the same size")
 
     return parser.parse_args()
