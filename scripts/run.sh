@@ -19,4 +19,4 @@ RUNS=(
   "--method compare  --epsilon 0.05"
 )
 
-python doubt.py ${RUNS[$SLURM_ARRAY_TASK_ID]}
+python experiment.py ${RUNS[$SLURM_ARRAY_TASK_ID]}
