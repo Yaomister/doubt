@@ -1,6 +1,7 @@
+#!/bin/bash
 #SBATCH --job-name=doubt
-#SBATCH --partition=gpu          # EDIT
-#SBATCH --gres=gpu:1             # 40GB is enough
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1       
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
