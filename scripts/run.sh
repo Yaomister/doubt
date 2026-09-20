@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=doubt
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
-#SBATCH --gres=gpu:1       
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=48G
+#SBATCH --time=08:00:00
+#SBATCH --output=logs/mu_%A_%a.out
 #SBATCH --array=0-4
-#SBATCH --output=logs/%a_%A.out
 
 mkdir -p logs
 
