@@ -70,8 +70,8 @@ def probe(model, x, z, prompt_length, zeros):
         # third value is what the model would write instead
         return sub, core, zc[sub].argmax(-1), None
     # same 32 positions, but stressed with a push aimed at the words sitting there
-    d, _, _ = nudge(model, xp, sub, zeros, target=x)
-    za = forward(model, xp, d)
+    d, _, _ = nudge(model, x, sub, zeros, target=x)
+    za = forward(model, x, d)
     mine = -torch.log_softmax(za[sub].float(), -1).gather(1, cur[:, None]).squeeze(1)
     return sub, core, zc[sub].argmax(-1), mine
 
@@ -173,12 +173,15 @@ def generate(model, prompt, method):
             #  denoise
             if method == "rethink":
                 # write, then stress test
-                d, z, y = nudge(model, x, candidates, torch.zeros_like(carry))
+                z = forward(model, x)
+                p = z.float().softmax(-1).max(-1).values
+                to_consider = pick_top(p, candidates, blanks_per_step)
+                d, z, y = nudge(model, x, to_consider, torch.zeros_like(carry))
                 p = z.float().softmax(-1).gather(-1, y[..., None]).squeeze(-1)
-                different = (forward(model, x, d).argmax(-1) != y) & candidates
+                different = (forward(model, x, d).argmax(-1) != y) & to_consider
                 changed_n = changed_n + int(different.sum())
-                total = total + int(candidates.sum())
-                survived = candidates if step == steps_per_block - 1 else candidates & ~different
+                total = total + int(to_consider.sum())
+                survived = to_consider if step == steps_per_block - 1 else to_consider& ~different
                 pick = pick_top(p, survived, blanks_per_step)
             elif method == "pressure":
                 # carry over the doubt from the last step
