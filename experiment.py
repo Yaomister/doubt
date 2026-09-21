@@ -1,4 +1,5 @@
 import re
+import os
 import json
 import torch
 import argparse
@@ -13,7 +14,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # For LLaDA
 generation_length = 256
-denoising_steps = 128
 block_size = 32
 MASK_ID = 126336
 
@@ -26,11 +26,13 @@ def _get_args():
     """Arguments for the experiment."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Instruct")
-    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "pressure", "core", "compare"])
-    parser.add_argument("--epsilon", type=float, required=False, type=float, default=0.005)
-    parser.add_argument("--random", type=bool, required=False, default=False)
+    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "pressure", "core"])
+    parser.add_argument("--epsilon", type=float, required=False, default=0.005)
+    parser.add_argument("--random", action="store_true", required=False, default=False)
     parser.add_argument("--output", required=False, default="./results")
-    parser.add_argument("-smoke-test", required=True)
+    parser.add_argument("--dataset", required=False, default="gsm8k")
+    parser.add_argument("--smoke-test", required=False, action="store_true")
+    parser.add_argument("--steps", type=int, default=128)
  
     return parser.parse_args()
 
@@ -58,7 +60,7 @@ def core(model, x, z, prompt_length, args):
 
     core = -torch.log_softmax(z_core[substitute].float(),  -1)
 
-    return substitute, core.gather(1, saved[:, None].squeeze(1)), z_core[substitute].argmax(-1)
+    return substitute, core.gather(1, saved[:, None]).squeeze(1), z_core[substitute].argmax(-1)
 
 
 def _load_model(args):
@@ -97,7 +99,7 @@ def rethink(model, x, candidates, original, args):
         z = model(x).logits[0, candidates].float()
         top = z.topk(2).values
         # we negate the margins because we want the direction that decreases the difference between the top 2 logits
-        nudge_directions = torch.autograd.grad(-(top[0] - top[1]), weights)
+        nudge_directions = torch.autograd.grad((top[0] - top[1]), weights)
 
     old_weights = [p.detach().clone() for p in weights]
 
@@ -119,10 +121,12 @@ def rethink(model, x, candidates, original, args):
             p.copy_(s)
 
         # if > 0 it flipped
-        return rival(max) - zz[original]
+        return float(rival.max() - zz[original])
 
 
 def generate(model, prompt):
+
+    os.makedirs(args.output, exist_ok=True)
 
     hidden_dimension = model.get_input_embeddings().weight.shape[1]
 
@@ -136,7 +140,7 @@ def generate(model, prompt):
     agree = []
 
     blocks = generation_length // block_size
-    steps_per_block = denoising_steps // blocks
+    steps_per_block = args.steps // blocks
 
     for block in range(blocks):
         start_index = prompt_length + block_size * block
@@ -155,9 +159,9 @@ def generate(model, prompt):
             pick = pick_top(p, candidates, blanks_per_step)
 
             if args.method == "rethink" and step < steps_per_block - 1:
-                for pos in pick[0].flatten().tolist():
+                for pos in pick[0].nonzero().flatten().tolist():
                     total += 1
-                    if rethink(model, x, candidates,  pick[pos], args) > 0:
+                    if rethink(model, x, pos,  y[0, pos], args) > 0:
                         # this means it chose a different token after rethinking
                         pick[0, pos] = False
                         changed_n += 1
@@ -165,28 +169,39 @@ def generate(model, prompt):
             x[pick] = y[pick]
             t += 1
 
-            if args.method in ("core", "compare") and t % 8 == 0 and 0.25 <= t / denoising_steps < 0.75:
+            if args.method in ("core") and t % 8 == 0 and 0.25 <= t / args.steps < 0.75:
                 out = core(model, x, z, prompt_length, args)
                 if out:
-                    tested, core_score, replacement, my_score = out
+                    tested, core_score, replacement = out
                     if args.method == "core":
                         # overwrite the token the model wants back least
                         worst = int(core_score.argmax())
                         x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
-                    elif core_score.std() > 1e-4 and my_score.std() > 1e-4:
+                    else:
                         theirs = tested[0].nonzero().flatten().tolist()
-                        mine = torch.tensor([rethink(model, x, s, x[0, s], theirs) for s in theirs], device=device)
-                        agree.append((spearman(core_score, my_score),
-                                      float(core_score.argmax() == my_score.argmax())))
+                        mine = torch.tensor([rethink(model, x, s, x[0, s], args) for s in theirs], device=device)
+                        if core_score.std() > 1e-4 and mine.std() > 1e-4:
+                            agree.append((spearman(core_score, mine),
+                                        float(core_score.argmax() == mine.argmax())))
 
     return x, changed_n, total, agree
 
-def prepare_question(dataset_name, question):
+def prepare_question(dataset_name, row):
     if dataset_name == "gsm8k":
-        chat = tokenizer.apply_chat_template([{"role": "user", "content": question["question"] + "\nReason step by step, then give the final answer after ####."}], add_generation_prompt=True, tokenize=False)
-        token_ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
-        return inpit 
-    return None
+        question = row['question']
+    elif dataset_name == "math":
+        question = row["problem"]
+    elif dataset_name == "humaneval":
+        question = f"Complete this function. Return the full function in a ```python block.\n\n```python\n{row['prompt']}```"
+    elif dataset_name == "mbpp":
+        question = "You are an expert Python programmer, and here is your task: " + row["text"] + "\nYour code should pass these tests:\n\n" + "\n".join(row["test_list"])
+    else:
+        raise ValueError()
+
+    formatted = tokenizer.apply_chat_template([{"role": "user", "content": question}], add_generation_prompt=True, tokenize=False)
+    token_ids = tokenizer(formatted, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+
+    return token_ids
 
 
 if __name__ == "__main__":
@@ -195,13 +210,14 @@ if __name__ == "__main__":
 
     records =[]
 
-    
     # running a smaller test to make sure everything works
     if args.smoke_test:
         dataset = load_dataset("openai/gsm8k", "main", split="test")
         amount_question = 50
+        hits = changes = candidates = 0
+        rho = []
         for i in range(amount_question):
-            answer = question["answer"].split("####")[-1].strip().replace(",", "")
+            answer = dataset[i]["answer"].split("####")[-1].strip().replace(",", "")
             input = prepare_question("gsm8k", dataset[i])
     
             out, f, c, ag = generate(model, input)
@@ -218,7 +234,8 @@ if __name__ == "__main__":
                 msg += f"fell={changes / max(candidates, 1):.2f}"
             if rho:
                 msg += f"rho={sum(r for r, _ in rho) / len(rho):+.2f}  same={sum(s for _, s in rho) / len(rho):.2f}"
-            
+
+            print(msg, flush=True)
             records.append({"i": i, "correct": bool(nums) and nums[0 if "####" in text else -1] == answer,
                 "acc": hits / (i + 1),
                 "deferral": changes / candidates if candidates else None,
@@ -228,15 +245,20 @@ if __name__ == "__main__":
                 json.dump({"args": vars(args), "records": records}, fh, indent=1)
     else:
         datasets = {
-            "gsm8k": "openai/gsm8k"
+            "gsm8k": "openai/gsm8k",
+            "math" : "HuggingFaceH4/MATH-500",
+            "humaneval": "openai/openai_humaneval",
+            "mbpp": "google-research-datasets/mbpp"
         }
-        dataset = load_dataset(datasets[args.dataset], "main", split="test")
 
+        dataset = load_dataset(datasets[args.dataset], "main" if args.dataset == "gsm8k" else None, split="test")
+        
         for i in range(len(dataset)):
             input = prepare_question(args.dataset, dataset[i])
 
-            res, _, _, _ = generate(model, input)
-            records.append(res)
+            res, changed, total, _ = generate(model, input)
+            text = tokenizer.decode(res[0, input.shape[1]:], skip_special_tokens=True)
+            records.append({"i": i, "output": text, "deferred": changed, "total": total})
 
-            with open(f'{args.output}/results_{args.model}_{args.method}_{args.epsilon}_{args.dataset}.json', "w") as f:
+            with open(f'{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json', "w") as f:
                 json.dump(records, f)
