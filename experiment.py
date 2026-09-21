@@ -1,82 +1,68 @@
 import re
+import json
 import torch
 import argparse
 from datasets import load_dataset
 from transformers import AutoModel, AutoTokenizer
 
 """
-DOUBT: Directed Opposition in the Denoising Loop of diffusion language models.
+DOUBT: Directed Opposition in the denoising loop of diffusion language models.
 """
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-# need to be model specific
-amount_questions = 50
+# For LLaDA
 generation_length = 256
 denoising_steps = 128
 block_size = 32
 MASK_ID = 126336
-carry_weight = 0.05
 
-epsilon = 0.005
-delta = None
-norm = 0.0
+def spearman(x, y):
+    n = len(x)
+    d = x.argsort().argsort().float() - y.argsort().argsort().float()
+    return float(1 - 6 * d.pow(2).sum() / (n * (n**2 - 1)))
 
-MODE = "rethink"
-RANDOM = False
-
-
-
-def spearman(a, b):
-    ra, rb = a.argsort().argsort().float(), b.argsort().argsort().float()
-    ra, rb = ra - ra.mean(), rb - rb.mean()
-    return float(ra @ rb / (ra.norm() * rb.norm() + 1e-12))
-
-
-def get_args():
-
+def _get_args():
+    """Arguments for the experiment."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=False, default="GSAI-ML/LLaDA-8B-Instruct")
-    parser.add_argument("--method", required=False, default="rethink",
-                        choices=["baseline", "rethink", "pressure", "core", "compare"])
-    parser.add_argument("--epsilon", required=False, type=float, default=0.005)
-    parser.add_argument("--random", action="store_true", help="control: undirected push of the same size")
-
+    parser.add_argument("--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Instruct")
+    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "pressure", "core", "compare"])
+    parser.add_argument("--epsilon", type=float, required=False, type=float, default=0.005)
+    parser.add_argument("--random", type=bool, required=False, default=False)
+    parser.add_argument("--output", required=False, default="./results")
+    parser.add_argument("-smoke-test", required=True)
+ 
     return parser.parse_args()
 
 
-def probe(model, x, z, prompt_length, zeros):
-    written = x != MASK_ID
-    written[:, :prompt_length] = False
-    # bail if theres not enough written
-    if int(written.sum()) < 4:
-        return None
-    # take the difference ebtween the top 2
-    p2 = z.float().softmax(-1).topk(2, -1).values
-    # fill unwritten tokens with very large numbers (so the margin is huge and blank slots are never picked)
-    margin = (p2[..., 0] - p2[..., 1]).masked_fill(~written, 1e30)
-    m = min(32, int(written.sum()))
-    sub = torch.zeros_like(written)
-    sub[0, margin[0].topk(m, largest=False).indices] = True
-    # remember the words before blanking them
-    cur = x[sub]
-    xp = x.masked_fill(sub, MASK_ID)
-    zc = forward(model, xp)
+def core(model, x, z, prompt_length, args):
+    already_written = x != MASK_ID
+    already_written[:, :prompt_length] = False
 
-    # how much does the model still want the token sitting there (big = it does not)
-    core = -torch.log_softmax(zc[sub].float(), -1).gather(1, cur[:, None]).squeeze(1)
-    if MODE == "core":
-        # third value is what the model would write instead
-        return sub, core, zc[sub].argmax(-1), None
-    # same 32 positions, but stressed with a push aimed at the words sitting there
-    d, _, _ = nudge(model, x, sub, zeros, target=x)
-    za = forward(model, x, d)
-    mine = -torch.log_softmax(za[sub].float(), -1).gather(1, cur[:, None]).squeeze(1)
-    return sub, core, zc[sub].argmax(-1), mine
+    if int(already_written.sum()) < 4:
+        return
+
+    top = z.float().softmax(-1).topk(2, -1).values
+
+    margin = (top[...,0] - top[...,1]).masked_fill(~already_written, 1e30)
+    # this is the number of margins to look for
+    m = min(32, int(already_written.sum()))
+
+    substitute = torch.zeros_like(already_written)
+    substitute[0, margin[0].topk(m, largest=False).indices] = True
+
+    saved = x[substitute]
+    xp = x.masked_fill(substitute, MASK_ID)
+    with torch.no_grad():
+        z_core = model(xp).logits
+
+    core = -torch.log_softmax(z_core[substitute].float(),  -1)
+
+    return substitute, core.gather(1, saved[:, None].squeeze(1)), z_core[substitute].argmax(-1)
 
 
-def load_model(args):
+def _load_model(args):
+    """Load the model."""
     model = AutoModel.from_pretrained(
         args.model,
         trust_remote_code=True,
@@ -90,64 +76,53 @@ def load_model(args):
         args.model,
         trust_remote_code=True
     )
-
-    def hook(module, input, output):
-        global norm
-        h = output[0] if isinstance(output, tuple) else output
-        norm = h.detach().float().norm(dim=-1).median()   # dim=-1, not norm(-1): that is the p=-1 norm
-        if delta is None:
-            return None
-        h = h + delta.to(h.dtype)
-        return (h, ) + tuple(output[1:]) if isinstance(output, tuple) else h
-
-    blocks = model.model.transformer.blocks
-    blocks[len(blocks) // 2].register_forward_hook(hook)
-
     return model, tokenizer
 
-
-def forward(model, x, d=None):
-    global delta
-    delta = d
-    with torch.no_grad():
-        z = model(x).logits
-    delta = None
-    return z
-
-
-def nudge(model, x, candidates, start, target=None):
-    """nudge the hidden states in the direction that shrinks the distance between the first and second most confident logits."""
-    global delta
-    d = start.detach().requires_grad_(True)
-    delta = d
-    with torch.enable_grad():
-        z = model(x).logits
-        y = z.argmax(-1) if target is None else target
-        zz, yy = z[candidates].float(), y[candidates]
-        first = zz.gather(1, torch.unsqueeze(yy, 1)).squeeze(1)
-        second = zz.topk(2, dim=1).values
-        rival = torch.where(second[:, 0] > first, second[:, 0], second[:, 1])
-        lead = first - rival
-        # negative because we want to supress it
-        (g, ) = torch.autograd.grad(-lead.sum(), d)
-    delta = None
-    r = epsilon * norm
-    if RANDOM:
-        g = torch.randn_like(g)
-    d = d.detach() + r * g / g.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-    return d * (r / d.norm(dim=-1, keepdim=True).clamp_min(1e-12)).clamp(max=1), z.detach(), y
-
-
 def pick_top(p, allowed, amount_to_pick):
-    """Pick the top-k elements."""
-    amount_to_pick = min(int(amount_to_pick), int(allowed.sum()))
+    amount_to_pick = min(int(allowed.sum()), int(amount_to_pick))
     selected = torch.zeros_like(allowed)
     if amount_to_pick:
         selected[0, p.masked_fill(~allowed, -1e30)[0].topk(amount_to_pick).indices] = True
     return selected
+    
+
+def rethink(model, x, candidates, original, args):
+    """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
+    # save the original weights
+    weights = list(model.model.transformer.blocks[-1].parameters())
+    for p in weights:
+        p.requires_grad_(True)
+
+    with torch.enable_grad():
+        z = model(x).logits[0, candidates].float()
+        top = z.topk(2).values
+        # we negate the margins because we want the direction that decreases the difference between the top 2 logits
+        nudge_directions = torch.autograd.grad(-(top[0] - top[1]), weights)
+
+    old_weights = [p.detach().clone() for p in weights]
+
+    with torch.no_grad():
+        for p, d in zip(weights, nudge_directions):
+            if args.random:
+                # add random noise
+                d = torch.randn_like(d)
+            # apply the adversarial nudge to the last layer weights
+            p -= (d / d.norm().clamp_min(1e-12)) * args.epsilon * p.norm()
+        
+        # retain the ones that remained the same after the nudge
+        zz = model(x).logits[0, candidates]
+        rival = zz.clone()
+        rival[original] = -1e30
+
+         # copying back the old weights
+        for p, s in zip(weights, old_weights):
+            p.copy_(s)
+
+        # if > 0 it flipped
+        return rival(max) - zz[original]
 
 
-def generate(model, prompt, method):
+def generate(model, prompt):
 
     hidden_dimension = model.get_input_embeddings().weight.shape[1]
 
@@ -170,71 +145,98 @@ def generate(model, prompt, method):
             candidates = x == MASK_ID
             candidates[:, :start_index], candidates[:, end_index:] = False, False
             blanks_per_step = -(-int(candidates.sum()) // (steps_per_block - step))
-            #  denoise
-            if method == "rethink":
-                # write, then stress test
-                z = forward(model, x)
-                p = z.float().softmax(-1).max(-1).values
-                to_consider = pick_top(p, candidates, blanks_per_step)
-                d, z, y = nudge(model, x, to_consider, torch.zeros_like(carry))
-                p = z.float().softmax(-1).gather(-1, y[..., None]).squeeze(-1)
-                different = (forward(model, x, d).argmax(-1) != y) & to_consider
-                changed_n = changed_n + int(different.sum())
-                total = total + int(to_consider.sum())
-                survived = to_consider if step == steps_per_block - 1 else to_consider& ~different
-                pick = pick_top(p, survived, blanks_per_step)
-            elif method == "pressure":
-                # carry over the doubt from the last step
-                carry, z, y = nudge(model, x, candidates, carry_weight * carry)
-                pick = pick_top(z.float().softmax(-1).gather(-1, y[..., None]).squeeze(-1), candidates, blanks_per_step)
-            else:
-                # good old denoising (also used by core and compare)
-                z = forward(model, x)
-                y = z.argmax(-1)
-                pick = pick_top(z.float().softmax(-1).gather(-1, y[..., None]).squeeze(-1), candidates, blanks_per_step)
-            # actually unmasking it
+
+            with torch.no_grad():
+                z = model(x).logits
+
+            y = z.argmax(-1)
+            p = z.float().softmax(-1).max(-1).values
+
+            pick = pick_top(p, candidates, blanks_per_step)
+
+            if args.method == "rethink" and step < steps_per_block - 1:
+                for pos in pick[0].flatten().tolist():
+                    total += 1
+                    if rethink(model, x, candidates,  pick[pos], args) > 0:
+                        # this means it chose a different token after rethinking
+                        pick[0, pos] = False
+                        changed_n += 1
+
             x[pick] = y[pick]
             t += 1
 
-            if method in ("core", "compare") and t % 8 == 0 and 0.25 <= t / denoising_steps < 0.75:
-                out = probe(model, x, z, prompt_length, torch.zeros_like(carry))
+            if args.method in ("core", "compare") and t % 8 == 0 and 0.25 <= t / denoising_steps < 0.75:
+                out = core(model, x, z, prompt_length, args)
                 if out:
                     tested, core_score, replacement, my_score = out
-                    if method == "core":
+                    if args.method == "core":
                         # overwrite the token the model wants back least
                         worst = int(core_score.argmax())
                         x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
                     elif core_score.std() > 1e-4 and my_score.std() > 1e-4:
+                        theirs = tested[0].nonzero().flatten().tolist()
+                        mine = torch.tensor([rethink(model, x, s, x[0, s], theirs) for s in theirs], device=device)
                         agree.append((spearman(core_score, my_score),
                                       float(core_score.argmax() == my_score.argmax())))
 
     return x, changed_n, total, agree
 
+def prepare_question(dataset_name, question):
+    if dataset_name == "gsm8k":
+        chat = tokenizer.apply_chat_template([{"role": "user", "content": question["question"] + "\nReason step by step, then give the final answer after ####."}], add_generation_prompt=True, tokenize=False)
+        token_ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+        return inpit 
+    return None
+
 
 if __name__ == "__main__":
-    args = get_args()
-    MODE, RANDOM, epsilon = args.method, args.random, args.epsilon
-    model, tokenizer = load_model(args)
-    method = args.method
+    args = _get_args()
+    model, tokenizer = _load_model(args)
 
-    dataset = load_dataset("openai/gsm8k", "main", split="test")
-    hits = changes = candidates = 0
-    rho = []
+    records =[]
 
-    for i in range(amount_questions):
-        answer = dataset[i]["answer"].split("####")[-1].strip().replace(",", "")
-        chat = tokenizer.apply_chat_template([{"role": "user", "content": dataset[i]["question"] + "\nReason step by step, then give the final answer after ####."}], add_generation_prompt=True, tokenize=False)
+    
+    # running a smaller test to make sure everything works
+    if args.smoke_test:
+        dataset = load_dataset("openai/gsm8k", "main", split="test")
+        amount_question = 50
+        for i in range(amount_question):
+            answer = question["answer"].split("####")[-1].strip().replace(",", "")
+            input = prepare_question("gsm8k", dataset[i])
+    
+            out, f, c, ag = generate(model, input)
 
-        ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
-        out, f, c, ag = generate(model, ids, method)
-        text = tokenizer.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
-        # probably move this to a separate decoding function
-        nums = re.findall(r"-?\d+", (text.split("####")[-1] if "####" in text else text).replace(",", ""))
-        hits += bool(nums) and nums[0 if "####" in text else -1] == answer
-        changes, candidates, rho = changes + f, candidates + c, rho + ag
-        msg = f"{i + 1}/{amount_questions}  acc={hits / (i + 1):.3f}"
-        if candidates:
-            msg += f"fell={changes / max(candidates, 1):.2f}"
-        if rho:
-            msg += f"rho={sum(r for r, _ in rho) / len(rho):+.2f}  same={sum(s for _, s in rho) / len(rho):.2f}"
-        print(msg, flush=True)
+            # check if answers match
+            text = tokenizer.decode(out[0, input.shape[1]:], skip_special_tokens=True)
+            nums = re.findall(r"-?\d+", (text.split("####")[-1] if "####" in text else text).replace(",", ""))
+
+            hits += bool(nums) and nums[0 if "####" in text else -1] == answer
+            changes, candidates, rho = changes + f, candidates + c, rho + ag
+
+            msg = f"{i + 1}/{amount_question}  acc={hits / (i + 1):.3f}"
+            if candidates:
+                msg += f"fell={changes / max(candidates, 1):.2f}"
+            if rho:
+                msg += f"rho={sum(r for r, _ in rho) / len(rho):+.2f}  same={sum(s for _, s in rho) / len(rho):.2f}"
+            
+            records.append({"i": i, "correct": bool(nums) and nums[0 if "####" in text else -1] == answer,
+                "acc": hits / (i + 1),
+                "deferral": changes / candidates if candidates else None,
+                "rho": sum(r for r, _ in rho) / len(rho) if rho else None})
+            
+            with open(f"{args.output}/smoke_test.json", "w") as fh:
+                json.dump({"args": vars(args), "records": records}, fh, indent=1)
+    else:
+        datasets = {
+            "gsm8k": "openai/gsm8k"
+        }
+        dataset = load_dataset(datasets[args.dataset], "main", split="test")
+
+        for i in range(len(dataset)):
+            input = prepare_question(args.dataset, dataset[i])
+
+            res, _, _, _ = generate(model, input)
+            records.append(res)
+
+            with open(f'{args.output}/results_{args.model}_{args.method}_{args.epsilon}_{args.dataset}.json', "w") as f:
+                json.dump(records, f)
