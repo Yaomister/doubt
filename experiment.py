@@ -3,6 +3,7 @@ import os
 import json
 import torch
 import argparse
+from shared import datasets_lookup
 from datasets import load_dataset
 from transformers import AutoModel, AutoTokenizer
 
@@ -244,14 +245,7 @@ if __name__ == "__main__":
             with open(f"{args.output}/smoke_test.json", "w") as fh:
                 json.dump({"args": vars(args), "records": records}, fh, indent=1)
     else:
-        datasets = {
-            "gsm8k": "openai/gsm8k",
-            "math" : "HuggingFaceH4/MATH-500",
-            "humaneval": "openai/openai_humaneval",
-            "mbpp": "google-research-datasets/mbpp"
-        }
-
-        dataset = load_dataset(datasets[args.dataset], "main" if args.dataset == "gsm8k" else None, split="test")
+        dataset = load_dataset(datasets_lookup[args.dataset], "main" if args.dataset == "gsm8k" else None, split="test")
         
         for i in range(len(dataset)):
             input = prepare_question(args.dataset, dataset[i])
