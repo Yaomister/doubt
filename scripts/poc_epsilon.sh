@@ -11,8 +11,7 @@
 source /home/yao.eric/doubt/.venv/bin/activate
 
 RUNS=(
-  "--method baseline"
-  "--method rethink --epsilon 0.005" 
+  "--method rethink --epsilon 0.005"
 )
 
 time python experiment.py --smoke-test ${RUNS[$SLURM_ARRAY_TASK_ID]}
