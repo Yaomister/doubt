@@ -10,8 +10,4 @@
 
 source /home/yao.eric/doubt/.venv/bin/activate
 
-RUNS=(
-  "--method rethink --epsilon 0.005 --random"
-)
-
-time python experiment.py --smoke-test ${RUNS[$SLURM_ARRAY_TASK_ID]}
+python experiment.py --smoke-test --method rethink --epsilon 0.005 --random

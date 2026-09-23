@@ -6,12 +6,8 @@
 #SBATCH --mem=48G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/doubt-smoke_%A_%a.out
-#SBATCH --array=0-3
 
 source /home/yao.eric/doubt/.venv/bin/activate
 
-RUNS=(
-  "--method rethink --epsilon 0.005"
-)
 
-time python experiment.py --smoke-test ${RUNS[$SLURM_ARRAY_TASK_ID]}
+python experiment.py --smoke-test --method rethink --epsilon 0.005

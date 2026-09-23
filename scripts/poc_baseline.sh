@@ -10,8 +10,5 @@
 
 source /home/yao.eric/doubt/.venv/bin/activate
 
-RUNS=(
-  "--method baseline"
-)
 
-time python experiment.py --smoke-test ${RUNS[$SLURM_ARRAY_TASK_ID]}
+time python experiment.py --smoke-test --method baseline
