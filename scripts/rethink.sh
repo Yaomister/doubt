@@ -8,6 +8,7 @@
 #SBATCH --output=logs/doubt-rethink_%A_%a.out
 #SBATCH --array=0-7
 
+module load python/3.13.5
 source /home/yao.eric/doubt/.venv/bin/activate
 
 RUNS=(

@@ -8,6 +8,8 @@
 #SBATCH --output=logs/doubt-eps-b_%A_%a.out
 #SBATCH --array=0-3
 
+
+module load python/3.13.5
 source /home/yao.eric/doubt/.venv/bin/activate
 
 RUNS=(

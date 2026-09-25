@@ -7,7 +7,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/doubt-smoke_%A_%a.out
 
+module load python/3.13.5
 source /home/yao.eric/doubt/.venv/bin/activate
-
 
 python experiment.py --smoke-test --method rethink --epsilon 0.005
