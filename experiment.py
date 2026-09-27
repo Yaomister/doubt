@@ -26,7 +26,7 @@ def _get_args():
     """Arguments for the experiment."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Base")
-    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "pressure", "core"])
+    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "margin", "core"])
     parser.add_argument("--epsilon", type=float, required=False, default=0.005)
     parser.add_argument("--random", action="store_true", required=False, default=False)
     parser.add_argument("--output", required=False, default="./results")
@@ -175,15 +175,24 @@ def generate(model, prompt, args):
             y = z.detach().argmax(-1)
             p = z.detach().float().softmax(-1).max(-1).values
 
-            pick = pick_top(p, candidates, blanks_per_step)
 
-            if args.method == "rethink" and step < steps_per_block - 1:
-                for pos in pick[0].nonzero().flatten().tolist():
-                    total += 1
-                    if rethink(model, x, z,  pos,  y[0, pos], args) > 0:
-                        # this means it chose a different token after rethinking
-                        pick[0, pos] = False
-                        changed_n += 1
+
+            if args.method == "baseline":
+                pick = pick_top(p, candidates, blanks_per_step)
+            elif args.method == "margin":
+                top2 = z.detach().float().softmax(-1).topk(2, -1).values
+                margins = top2[..., 0] - top2[..., 1]
+                pick = pick_top(margins, candidates, blanks_per_step)
+            else:
+                pick = pick_top(p, candidates, blanks_per_step)
+
+                if args.method == "rethink" and step < steps_per_block - 1:
+                    for pos in pick[0].nonzero().flatten().tolist():
+                        total += 1
+                        if rethink(model, x, z,  pos,  y[0, pos], args) > 0:
+                            # this means it chose a different token after rethinking
+                            pick[0, pos] = False
+                            changed_n += 1
 
             x[pick] = y[pick]
             t += 1
