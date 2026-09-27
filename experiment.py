@@ -14,8 +14,6 @@ DOUBT: Directed Opposition in the denoising loop of diffusion language models.
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # For LLaDA
-generation_length = 256
-block_size = 32
 MASK_ID = 126336
 
 def spearman(x, y):
@@ -143,26 +141,26 @@ def rethink(model, x, z,  candidates, original, args):
         return float(rival.max() - zz[original])
 
 
-def generate(model, prompt):
+def generate(model, prompt, args):
 
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
-    x = torch.full((1, prompt_length + generation_length), MASK_ID, dtype=torch.long, device=device)
+    x = torch.full((1, prompt_length + args.generation_length), MASK_ID, dtype=torch.long, device=device)
     x[:, :prompt_length] = prompt
 
     changed_n, total, t = 0, 0, 0
     agree = []
 
     # number of blocks
-    blocks = generation_length // block_size
+    blocks = args.generation_length // args.block_length
     # number of steps per block
     steps_per_block = args.steps // blocks
 
     for block in range(blocks):
         # the start and end index of the block
-        start_index = prompt_length + block_size * block
-        end_index = prompt_length + block_size * (block + 1)
+        start_index = prompt_length + args.block_length * block
+        end_index = prompt_length + args.block_length * (block + 1)
 
         # repeat per decoding step
         for step in range(steps_per_block):
