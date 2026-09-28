@@ -8,8 +8,6 @@
 #SBATCH --output=logs/doubt-exp1b_%A_%a.out
 #SBATCH --array=0-7
 
-# Experiment 1 (main comparison), part B: CoRe and Rethink
-# Results go to results/doubt-exp1b_<line number>. If a job times out, submit this script again.
 
 module load python/3.13.5
 source /home/yao.eric/doubt/.venv/bin/activate
@@ -27,4 +25,4 @@ RUNS=(
 )
 
 NAME=doubt-exp1b_$SLURM_ARRAY_TASK_ID
-python eval_doubt.py --model doubt ${RUNS[$SLURM_ARRAY_TASK_ID]} --output_path results/$NAME --log_samples --use_cache cache/${NAME}_
+python harness.py --model doubt ${RUNS[$SLURM_ARRAY_TASK_ID]} --output_path results/$NAME --log_samples --use_cache cache/${NAME}_

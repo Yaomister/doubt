@@ -25,4 +25,4 @@ RUNS=(
 )
 
 NAME=doubt-exp1a_$SLURM_ARRAY_TASK_ID
-python eval_doubt.py --model doubt ${RUNS[$SLURM_ARRAY_TASK_ID]} --output_path results/$NAME --log_samples --use_cache cache/${NAME}_
+python harness.py --model doubt ${RUNS[$SLURM_ARRAY_TASK_ID]} --output_path results/$NAME --log_samples --use_cache cache/${NAME}_
