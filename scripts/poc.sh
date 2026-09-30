@@ -14,11 +14,8 @@ export HF_ALLOW_CODE_EVAL=1
 
 RUNS=(
   "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=baseline"
-  "--tasks mbpp --num_fewshot 3 --confirm_run_unsafe_code --limit 100 --model_args method=baseline"
   "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=core"
-  "--tasks mbpp --num_fewshot 3 --confirm_run_unsafe_code --limit 100 --model_args method=core"
   "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=rethink"
-  "--tasks mbpp --num_fewshot 3 --confirm_run_unsafe_code --limit 100 --model_args method=rethink"
 )
 
 NAME=doubt-poc_$SLURM_ARRAY_TASK_ID
