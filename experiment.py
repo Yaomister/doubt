@@ -82,7 +82,7 @@ def _load_model(args):
     model = AutoModel.from_pretrained(
         args.model,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
+       dtype=torch.bfloat16,
         device_map="auto"
     )
 
@@ -281,5 +281,5 @@ if __name__ == "__main__":
             text = tokenizer.decode(res[0, input.shape[1]:], skip_special_tokens=True)
             records.append({"i": i, "output": text, "deferred": changed, "total": total})
 
-            with open(f'{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json', "w") as f:
+            with open(f"{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json", "w") as f:
                 json.dump(records, f)

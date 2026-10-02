@@ -16,7 +16,7 @@ class DoubtLM(LM):
     def __init__(self, model_path = "GSAI-ML/LLaDA-8B-Base", method="baseline", epsilon=0.005, random=False, steps=128, generation_length=512, block_length=512, **kwargs):
         super().__init__()
         self.deferred = self.probed = 0
-        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True, torch_dtype = torch.bfloat16).eval().requires_grad(False).to(device)
+        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True, torch_dtype = torch.bfloat16).eval().requires_grad_(False).to(device)
 
         # make sure we can take the gradient of the last layer weights
         for w in self.model.model.transformer.blocks[-1].parameters():
@@ -30,7 +30,7 @@ class DoubtLM(LM):
         answers = []
 
         for request in tqdm(requests, desc="generating..."):
-            prompt_text, generation_kwargs = requests.args
+            prompt_text, generation_kwargs = request.args
             prompt = torch.tensor([self.tokenizer(prompt_text)['input_ids']], device=device)
 
             generated_answer, deferred, probed, _ = generate(self.model, prompt, self.args)
