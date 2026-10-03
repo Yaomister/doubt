@@ -48,7 +48,7 @@ def core(model, x, z, prompt_length, args):
         return
 
     # the top most confident tokens
-    top = z.float().softmax(-1).topk(2, -1).values. candidates
+    top = z.float().softmax(-1).topk(2, -1).values
 
     # the margin between the top 2 tokens
     margin = (top[...,0] - top[...,1]).masked_fill(~already_written, 1e30)
