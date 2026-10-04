@@ -6,16 +6,19 @@
 #SBATCH --mem=48G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/doubt-poc_%A_%a.out
-#SBATCH --array=0-2
+#SBATCH --array=0-5
 
 module load python/3.13.5
 source /home/yao.eric/doubt/.venv/bin/activate
 export HF_ALLOW_CODE_EVAL=1
 
 RUNS=(
-  "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=baseline"
-  "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=core"
-  "--tasks gsm8k --num_fewshot 4 --limit 100 --model_args method=rethink"
+  "--tasks gsm8k --num_fewshot 4 --limit 800 --model_args method=baseline"
+  "--tasks gsm8k --num_fewshot 4 --limit 800 --model_args method=core"
+  "--tasks gsm8k --num_fewshot 4 --limit 800 --model_args method=rethink"
+  "--tasks mbpp --num_fewshot 3 --limit 800 --model_args method=baseline"
+  "--tasks mbpp --num_fewshot 3 --limit 800 --model_args method=core"
+  "--tasks mbpp --num_fewshot 3 --limit 800 --model_args method=rethink"
 )
 
 NAME=doubt-poc_$SLURM_ARRAY_TASK_ID
