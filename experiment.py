@@ -16,6 +16,17 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # For LLaDA
 MASK_ID = 126336
 
+_tail = {}
+
+def _save_last_layer_weights(model, args, kwargs):
+    _tail['args'], _tail["kwargs"] = args, kwargs
+
+def calculate_last_layer_logits(model, pos):
+    t = model.model.transformer
+    h = t.blocks[-1](*_tail["args"], **_tail["kwargs"])[0]
+    return t.ff_out(t.ln_f(h[0, pos]))
+
+
 def spearman(x, y):
     """calculate the separman correlation between two distributions."""
     n = len(x)
@@ -129,7 +140,7 @@ def rethink(model, x, z,  candidates, original, args):
             p.data -= (d / d.norm().clamp_min(1e-12)) * args.epsilon * p.norm()
         
         # retain the ones that remained the same after the nudge
-        zz = model(x).logits[0, candidates]
+        zz = calculate_last_layer_logits(model, candidates)
         rival = zz.clone()
         rival[original] = -1e30
 
@@ -186,7 +197,7 @@ def generate(model, prompt, args):
             else:
                 pick = pick_top(p, candidates, blanks_per_step)
 
-                if args.method == "rethink" and step < steps_per_block - 1:
+                if args.method == "rethink" and step < steps_per_block - 1 and 0.25 < t/args.steps < 0.75:
                     for pos in pick[0].nonzero().flatten().tolist():
                         total += 1
                         if rethink(model, x, z,  pos,  y[0, pos], args) > 0:

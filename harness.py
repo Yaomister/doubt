@@ -7,6 +7,7 @@ from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
 from transformers import AutoModel, AutoTokenizer
+from experiment import generate, device, _save_last_layer_weights
 
 
 
@@ -21,6 +22,9 @@ class DoubtLM(LM):
         # make sure we can take the gradient of the last layer weights
         for w in self.model.model.transformer.blocks[-1].parameters():
             w.requires_grad_(True)
+
+
+        self.model.model.transformer.blocks[-1].register_forward_pre_hook(_save_last_layer_weights, with_kwargs=True)
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.args = SimpleNamespace(epsilon = float(epsilon), random = bool(random), method = method, steps = int(steps), generation_length = int(generation_length), block_length = int(block_length), output = "./results")
