@@ -219,7 +219,7 @@ def generate(model, prompt, args):
                     and step < steps_per_block - 1
                     and 0.25 < t / args.steps < 0.75
                 ):
-                    limit = len(p) * 0.25
+                    limit = 3 * blanks_per_step
                     amount_probed = 0
                     pick = torch.zeros_like(candidates)
                     for pos in (
@@ -230,10 +230,9 @@ def generate(model, prompt, args):
                     ):
                         if pick.sum() == blanks_per_step or amount_probed > limit:
                             break
-
+                        amount_probed += 1
                         if rethink(model, x, z, pos, y[0, pos], args) <= 0:
                             # this means that it survived the shake
-                            amount_probed += 1
                             pick[0, pos] = True
             x[pick] = y[pick]
 
