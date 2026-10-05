@@ -18,8 +18,10 @@ MASK_ID = 126336
 
 _tail = {}
 
+
 def _save_last_layer_weights(model, args, kwargs):
-    _tail['args'], _tail["kwargs"] = args, kwargs
+    _tail["args"], _tail["kwargs"] = args, kwargs
+
 
 def calculate_last_layer_logits(model, pos):
     t = model.model.transformer
@@ -33,19 +35,29 @@ def spearman(x, y):
     d = x.argsort().argsort().float() - y.argsort().argsort().float()
     return float(1 - 6 * d.pow(2).sum() / (n * (n**2 - 1)))
 
+
 def _get_args():
     """Arguments for the experiment."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Base")
-    parser.add_argument("--method", type=str, required=False, default="rethink", choices=["baseline", "rethink", "margin", "core"])
+    parser.add_argument(
+        "--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Base"
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        required=False,
+        default="rethink",
+        choices=["baseline", "rethink", "margin", "core"],
+    )
     parser.add_argument("--epsilon", type=float, required=False, default=0.005)
     parser.add_argument("--random", action="store_true", required=False, default=False)
     parser.add_argument("--output", required=False, default="./results")
     parser.add_argument("--dataset", required=False, default="gsm8k")
     parser.add_argument("--smoke-test", required=False, action="store_true")
     parser.add_argument("--steps", type=int, default=128)
- 
+
     return parser.parse_args()
+
 
 def core(model, x, z, prompt_length, args):
     """CoRE."""
@@ -62,7 +74,7 @@ def core(model, x, z, prompt_length, args):
     top = z.float().softmax(-1).topk(2, -1).values
 
     # the margin between the top 2 tokens
-    margin = (top[...,0] - top[...,1]).masked_fill(~already_written, 1e30)
+    margin = (top[..., 0] - top[..., 1]).masked_fill(~already_written, 1e30)
 
     # this is the number of margins to look for
     m = min(32, int(already_written.sum()))
@@ -82,19 +94,20 @@ def core(model, x, z, prompt_length, args):
     with torch.no_grad():
         z_core = model(xp).logits
 
-    core = -torch.log_softmax(z_core[substitute].float(),  -1)
+    core = -torch.log_softmax(z_core[substitute].float(), -1)
 
     # return the old choices and the new choices
-    return substitute, core.gather(1, saved[:, None]).squeeze(1), z_core[substitute].argmax(-1)
+    return (
+        substitute,
+        core.gather(1, saved[:, None]).squeeze(1),
+        z_core[substitute].argmax(-1),
+    )
 
 
 def _load_model(args):
     """Load the model."""
     model = AutoModel.from_pretrained(
-        args.model,
-        trust_remote_code=True,
-       dtype=torch.bfloat16,
-        device_map="auto"
+        args.model, trust_remote_code=True, dtype=torch.bfloat16, device_map="auto"
     )
 
     # freeze the model
@@ -103,22 +116,22 @@ def _load_model(args):
         w.requires_grad_(True)
     model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     return model, tokenizer
+
 
 def pick_top(p, allowed, amount_to_pick):
     """pick the top k values form the list of allowed positions."""
     amount_to_pick = min(int(allowed.sum()), int(amount_to_pick))
     selected = torch.zeros_like(allowed)
     if amount_to_pick:
-        selected[0, p.masked_fill(~allowed, -1e30)[0].topk(amount_to_pick).indices] = True
+        selected[0, p.masked_fill(~allowed, -1e30)[0].topk(amount_to_pick).indices] = (
+            True
+        )
     return selected
-    
 
-def rethink(model, x, z,  candidates, original, args):
+
+def rethink(model, x, z, candidates, original, args):
     """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
     # save the original weights
     weights = list(model.model.transformer.blocks[-1].parameters())
@@ -127,7 +140,9 @@ def rethink(model, x, z,  candidates, original, args):
     top = z[0, candidates].topk(2).values
 
     # we negate the margins because we want the direction that decreases the difference between the top 2 logits
-    nudge_directions = torch.autograd.grad((top[0] - top[1]), weights, retain_graph=True)
+    nudge_directions = torch.autograd.grad(
+        (top[0] - top[1]), weights, retain_graph=True
+    )
 
     old_weights = [p.detach().clone() for p in weights]
 
@@ -138,13 +153,13 @@ def rethink(model, x, z,  candidates, original, args):
                 d = torch.randn_like(d)
             # apply the adversarial nudge to the last layer weights
             p.data -= (d / d.norm().clamp_min(1e-12)) * args.epsilon * p.norm()
-        
+
         # retain the ones that remained the same after the nudge
         zz = calculate_last_layer_logits(model, candidates)
         rival = zz.clone()
         rival[original] = -1e30
 
-         # copying back the old weights
+        # copying back the old weights
         for p, s in zip(weights, old_weights):
             p.data.copy_(s)
 
@@ -157,7 +172,12 @@ def generate(model, prompt, args):
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
-    x = torch.full((1, prompt_length + args.generation_length), MASK_ID, dtype=torch.long, device=device)
+    x = torch.full(
+        (1, prompt_length + args.generation_length),
+        MASK_ID,
+        dtype=torch.long,
+        device=device,
+    )
     x[:, :prompt_length] = prompt
 
     changed_n, total, t = 0, 0, 0
@@ -182,11 +202,9 @@ def generate(model, prompt, args):
 
             with torch.set_grad_enabled(args.method == "rethink"):
                 output = model(x)
-                z = output.logits            
+                z = output.logits
             y = z.detach().argmax(-1)
             p = z.detach().float().softmax(-1).max(-1).values
-
-
 
             if args.method == "baseline":
                 pick = pick_top(p, candidates, blanks_per_step)
@@ -196,19 +214,31 @@ def generate(model, prompt, args):
                 pick = pick_top(margins, candidates, blanks_per_step)
             else:
                 pick = pick_top(p, candidates, blanks_per_step)
+                if (
+                    args.method == "rethink"
+                    and step < steps_per_block - 1
+                    and 0.25 < t / args.steps < 0.75
+                ):
+                    pick = torch.zeros_like(candidates)
+                    for pos in (
+                        p[0]
+                        .masked_fill(~candidates[0], -1e30)
+                        .argsort(descending=True)[: int(candidates.sum())]
+                        .tolist()
+                    ):
+                        if pick.sum() == blanks_per_step:
+                            break
 
-                if args.method == "rethink" and step < steps_per_block - 1 and 0.25 < t/args.steps < 0.75:
-                    for pos in pick[0].nonzero().flatten().tolist():
-                        total += 1
-                        if rethink(model, x, z,  pos,  y[0, pos], args) > 0:
-                            # this means it chose a different token after rethinking
-                            pick[0, pos] = False
-                            changed_n += 1
-
+                        if rethink(model, x, z, pos, y[0, pos], args) <= 0:
+                            # this means that it survived the shake
+                            pick[0, pos] = True
             x[pick] = y[pick]
-            t += 1
 
-            if args.method in ("core", ) and t % 8 == 0 and 0.25 <= t / args.steps < 0.75:
+            if (
+                args.method in ("core",)
+                and t % 8 == 0
+                and 0.25 <= t / args.steps < 0.75
+            ):
                 out = core(model, x, z, prompt_length, args)
                 if out:
                     tested, core_score, replacement = out
@@ -218,27 +248,46 @@ def generate(model, prompt, args):
                         x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
                     else:
                         theirs = tested[0].nonzero().flatten().tolist()
-                        mine = torch.tensor([rethink(model, x, z, s, x[0, s], args) for s in theirs], device=device)
+                        mine = torch.tensor(
+                            [rethink(model, x, z, s, x[0, s], args) for s in theirs],
+                            device=device,
+                        )
                         if core_score.std() > 1e-4 and mine.std() > 1e-4:
-                            agree.append((spearman(core_score, mine),
-                                        float(core_score.argmax() == mine.argmax())))
+                            agree.append(
+                                (
+                                    spearman(core_score, mine),
+                                    float(core_score.argmax() == mine.argmax()),
+                                )
+                            )
 
     return x, changed_n, total, agree
 
+
 def prepare_question(dataset_name, row):
     if dataset_name == "gsm8k":
-        question = row['question']
+        question = row["question"]
     elif dataset_name == "math":
         question = row["problem"]
     elif dataset_name == "humaneval":
         question = f"Complete this function. Return the full function in a ```python block.\n\n```python\n{row['prompt']}```"
     elif dataset_name == "mbpp":
-        question = "You are an expert Python programmer, and here is your task: " + row["text"] + "\nYour code should pass these tests:\n\n" + "\n".join(row["test_list"])
+        question = (
+            "You are an expert Python programmer, and here is your task: "
+            + row["text"]
+            + "\nYour code should pass these tests:\n\n"
+            + "\n".join(row["test_list"])
+        )
     else:
         raise ValueError()
 
-    formatted = tokenizer.apply_chat_template([{"role": "user", "content": question}], add_generation_prompt=True, tokenize=False)
-    token_ids = tokenizer(formatted, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+    formatted = tokenizer.apply_chat_template(
+        [{"role": "user", "content": question}],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+    token_ids = tokenizer(
+        formatted, add_special_tokens=False, return_tensors="pt"
+    ).input_ids.to(device)
 
     return token_ids
 
@@ -247,7 +296,7 @@ if __name__ == "__main__":
     args = _get_args()
     model, tokenizer = _load_model(args)
 
-    records =[]
+    records = []
 
     # running a smaller test to make sure everything works
     if args.smoke_test:
@@ -258,12 +307,15 @@ if __name__ == "__main__":
         for i in range(amount_question):
             answer = dataset[i]["answer"].split("####")[-1].strip().replace(",", "")
             input = prepare_question("gsm8k", dataset[i])
-    
+
             out, f, c, ag = generate(model, input)
 
             # check if answers match
-            text = tokenizer.decode(out[0, input.shape[1]:], skip_special_tokens=True)
-            nums = re.findall(r"-?\d+", (text.split("####")[-1] if "####" in text else text).replace(",", ""))
+            text = tokenizer.decode(out[0, input.shape[1] :], skip_special_tokens=True)
+            nums = re.findall(
+                r"-?\d+",
+                (text.split("####")[-1] if "####" in text else text).replace(",", ""),
+            )
 
             hits += bool(nums) and nums[0 if "####" in text else -1] == answer
             changes, candidates, rho = changes + f, candidates + c, rho + ag
@@ -275,22 +327,37 @@ if __name__ == "__main__":
                 msg += f"rho={sum(r for r, _ in rho) / len(rho):+.2f}  same={sum(s for _, s in rho) / len(rho):.2f}"
 
             print(msg, flush=True)
-            records.append({"i": i, "correct": bool(nums) and nums[0 if "####" in text else -1] == answer,
-                "acc": hits / (i + 1),
-                "deferral": changes / candidates if candidates else None,
-                "rho": sum(r for r, _ in rho) / len(rho) if rho else None})
-            
+            records.append(
+                {
+                    "i": i,
+                    "correct": bool(nums)
+                    and nums[0 if "####" in text else -1] == answer,
+                    "acc": hits / (i + 1),
+                    "deferral": changes / candidates if candidates else None,
+                    "rho": sum(r for r, _ in rho) / len(rho) if rho else None,
+                }
+            )
+
             with open(f"{args.output}/smoke_test.json", "w") as fh:
                 json.dump({"args": vars(args), "records": records}, fh, indent=1)
     else:
-        dataset = load_dataset(datasets_lookup[args.dataset], "main" if args.dataset == "gsm8k" else None, split="test")
-        
+        dataset = load_dataset(
+            datasets_lookup[args.dataset],
+            "main" if args.dataset == "gsm8k" else None,
+            split="test",
+        )
+
         for i in range(len(dataset)):
             input = prepare_question(args.dataset, dataset[i])
 
             res, changed, total, _ = generate(model, input)
-            text = tokenizer.decode(res[0, input.shape[1]:], skip_special_tokens=True)
-            records.append({"i": i, "output": text, "deferred": changed, "total": total})
+            text = tokenizer.decode(res[0, input.shape[1] :], skip_special_tokens=True)
+            records.append(
+                {"i": i, "output": text, "deferred": changed, "total": total}
+            )
 
-            with open(f"{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json", "w") as f:
+            with open(
+                f"{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json",
+                "w",
+            ) as f:
                 json.dump(records, f)
