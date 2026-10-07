@@ -262,6 +262,8 @@ def generate(model, prompt, args):
                                 )
                             )
 
+            t = t + 1
+
     return x, changed_n, total, agree
 
 
