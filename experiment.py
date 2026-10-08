@@ -16,18 +16,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # For LLaDA
 MASK_ID = 126336
 
-_tail = {}
-
-
-def _save_last_layer_weights(model, args, kwargs):
-    _tail["args"], _tail["kwargs"] = args, kwargs
-
-
-def calculate_last_layer_logits(model, pos):
-    t = model.model.transformer
-    h = t.blocks[-1](*_tail["args"], **_tail["kwargs"])[0]
-    return t.ff_out(t.ln_f(h[0, pos]))
-
 
 def spearman(x, y):
     """calculate the separman correlation between two distributions."""
@@ -131,7 +119,7 @@ def pick_top(p, allowed, amount_to_pick):
     return selected
 
 
-def rethink(model, x, z, candidates, original, args):
+def rethink(model, z, candidates, args):
     """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
     # save the original weights
     weights = list(model.model.transformer.blocks[-1].parameters())
@@ -139,32 +127,15 @@ def rethink(model, x, z, candidates, original, args):
     # get the top logits
     top = z[0, candidates].topk(2).values
 
-    # we negate the margins because we want the direction that decreases the difference between the top 2 logits
-    nudge_directions = torch.autograd.grad(
-        (top[0] - top[1]), weights, retain_graph=True
+    m = top[0] - top[1]
+
+    grads = torch.autograd.grad(m, weights, retain_graph=True)
+
+    drop = sum(
+        (w.float().abs() * g.float().abs()).sum() for w, g in zip(weights, grads)
     )
 
-    old_weights = [p.detach().clone() for p in weights]
-
-    with torch.no_grad():
-        for p, d in zip(weights, nudge_directions):
-            if args.random:
-                # add random noise
-                d = torch.randn_like(d)
-            # apply the adversarial nudge to the last layer weights
-            p.data -= (d / d.norm().clamp_min(1e-12)) * args.epsilon * p.norm()
-
-        # retain the ones that remained the same after the nudge
-        zz = calculate_last_layer_logits(model, candidates)
-        rival = zz.clone()
-        rival[original] = -1e30
-
-        # copying back the old weights
-        for p, s in zip(weights, old_weights):
-            p.data.copy_(s)
-
-        # if > 0 it flipped.
-        return float(rival.max() - zz[original])
+    return float(args.epsilon * drop - m)
 
 
 def generate(model, prompt, args):
@@ -231,9 +202,16 @@ def generate(model, prompt, args):
                         if pick.sum() == blanks_per_step or amount_probed > limit:
                             break
                         amount_probed += 1
-                        if rethink(model, x, z, pos, y[0, pos], args) <= 0:
+                        total += 1
+                        if rethink(model, z, pos, args) <= 0:
                             # this means that it survived the shake
                             pick[0, pos] = True
+                        else:
+                            changed_n += 1
+
+                    missing = blanks_per_step - pick.sum()
+                    if missing >= 0:
+                        pick |= pick_top(p, candidates & ~pick, missing)
             x[pick] = y[pick]
 
             if (
