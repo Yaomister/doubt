@@ -15,9 +15,9 @@ export HF_ALLOW_CODE_EVAL=1
 RUNS=(
   "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=baseline"
   "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=core"
-  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink"
-  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink,epsilon=0.01"
-  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink,epsilon=0.05"
+  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink,epsilon=0.00035"
+  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink,epsilon=0.0007"
+  "--tasks gsm8k --num_fewshot 4 --limit 500 --model_args method=rethink,epsilon=0.001"
   "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=baseline"
   "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=core"
   "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink"
