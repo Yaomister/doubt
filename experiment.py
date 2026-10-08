@@ -131,15 +131,15 @@ def rethink(model, z, candidates, args):
 
     grads = torch.autograd.grad(m, weights, retain_graph=True)
 
-    drop = sum(
-        (w.float().abs() * g.float().abs()).sum() for w, g in zip(weights, grads)
-    )
-
-    return float(args.epsilon * drop - m)
+    with torch.no_grad():
+        drop = sum(
+            (w.float().abs() * g.float().abs()).sum() for w, g in zip(weights, grads)
+        )
+        print(f"ratio {float(m.sum() / drop)}")
+        return float(args.epsilon * drop - m)
 
 
 def generate(model, prompt, args):
-
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
