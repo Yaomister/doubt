@@ -122,7 +122,7 @@ def pick_top(p, allowed, amount_to_pick):
 def rethink(model, z, candidates, args):
     """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
     # save the original weights
-    weights = list(model.model.tfransformer.blocks[-1].parameters())
+    weights = list(model.model.transformer.blocks[-1].parameters())
 
     # get the top logits
     top = z[0, candidates].topk(2).values
