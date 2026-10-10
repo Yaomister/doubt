@@ -140,6 +140,14 @@ def rethink(model, z, candidates, args):
 
 
 def generate(model, prompt, args):
+    amount_to_wait_to_change = 4
+    window = 16
+    max_delay = 4
+    flagged = {}
+
+    def check_neighbours(x, pos):
+        return int((x[0, max(0, pos - window) : pos + window + 1] != MASK_ID).sum())
+
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
@@ -190,17 +198,35 @@ def generate(model, prompt, args):
                     and step < steps_per_block - 1
                     and 0.25 < step / steps_per_block < 0.75
                 ):
+                    held = torch.zeros_like(candidates)
+
+                    for pos, (t0, n0) in flagged.items():
+                        if (
+                            x[0, pos] == MASK_ID
+                            and t - t0 < max_delay
+                            and check_neighbours(x, pos) - n0 < amount_to_wait_to_change
+                        ):
+                            held[0, pos] = True
+
+                    elegible = candidates * ~held
+
+                    if int(elegible.sum()) < blanks_per_step:
+                        elegible = candidates.clone()
+
                     limit = 3 * blanks_per_step
                     amount_probed = 0
                     pick = torch.zeros_like(candidates)
                     for pos in (
                         p[0]
-                        .masked_fill(~candidates[0], -1e30)
-                        .argsort(descending=True)[: int(candidates.sum())]
+                        .masked_fill(~elegible[0], -1e30)
+                        .argsort(descending=True)[: int(elegible.sum())]
                         .tolist()
                     ):
                         if pick.sum() == blanks_per_step or amount_probed > limit:
                             break
+                        if pos in flagged:  # already waited once: no second test
+                            pick[0, pos] = True
+                            continue
                         amount_probed += 1
                         total += 1
                         if rethink(model, z, pos, args) <= 0:
@@ -208,10 +234,12 @@ def generate(model, prompt, args):
                             pick[0, pos] = True
                         else:
                             changed_n += 1
+                            flagged[pos] = (t, check_neighbours(x, pos))
+                            elegible[0, pos] = False
 
                     missing = blanks_per_step - pick.sum()
                     if missing >= 0:
-                        pick |= pick_top(p, candidates & ~pick, missing)
+                        pick |= pick_top(p, elegible & ~pick, missing)
             x[pick] = y[pick]
 
             if (
@@ -229,7 +257,7 @@ def generate(model, prompt, args):
                     else:
                         theirs = tested[0].nonzero().flatten().tolist()
                         mine = torch.tensor(
-                            [rethink(model, x, z, s, x[0, s], args) for s in theirs],
+                            [rethink(model, z, s, args) for s in theirs],
                             device=device,
                         )
                         if core_score.std() > 1e-4 and mine.std() > 1e-4:
