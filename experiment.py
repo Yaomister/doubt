@@ -119,34 +119,7 @@ def pick_top(p, allowed, amount_to_pick):
     return selected
 
 
-def rethink(model, z, candidates, args):
-    """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
-    # save the original weights
-    weights = list(model.model.transformer.blocks[-1].parameters())
-
-    # get the top logits
-    top = z[0, candidates].topk(2).values
-
-    m = top[0] - top[1]
-
-    grads = torch.autograd.grad(m, weights, retain_graph=True)
-
-    with torch.no_grad():
-        drop = sum(
-            (w.float().abs() * g.float().abs()).sum() for w, g in zip(weights, grads)
-        )
-        print(f"ratio {float(m.sum() / drop)}")
-        return float(args.epsilon * drop - m)
-
-
 def generate(model, prompt, args):
-    amount_to_wait_to_change = 4
-    window = 16
-    max_delay = 4
-    flagged = {}
-
-    def check_neighbours(x, pos):
-        return int((x[0, max(0, pos - window) : pos + window + 1] != MASK_ID).sum())
 
     os.makedirs(args.output, exist_ok=True)
 
@@ -179,8 +152,8 @@ def generate(model, prompt, args):
             candidates[:, :start_index], candidates[:, end_index:] = False, False
             blanks_per_step = -(-int(candidates.sum()) // (steps_per_block - step))
 
-            with torch.set_grad_enabled(args.method == "rethink"):
-                output = model(x)
+            with torch.no_grad():
+                output = model(x, output_hidden_states=(args.method == "rethink"))
                 z = output.logits
             y = z.detach().argmax(-1)
             p = z.detach().float().softmax(-1).max(-1).values
@@ -198,48 +171,22 @@ def generate(model, prompt, args):
                     and step < steps_per_block - 1
                     and 0.25 < step / steps_per_block < 0.75
                 ):
-                    held = torch.zeros_like(candidates)
+                    h = output.hidden_states[-1][0].float()
+                    W = model.model.transformer.ff_out.weight
+                    top = z[0].topk(2, -1)
+                    w = W[top.indices].float()
+                    worst = top.values.float() - args.epsilon * (
+                        w.abs() * h.abs()[:, None]
+                    ).sum(-1)
+                    robust = top.indices.gather(
+                        1, worst.argmax(-1, keepdim=True)
+                    ).squeeze(-1)
+                    swapped = pick[0] & (robust != y[0])
 
-                    for pos, (t0, n0) in flagged.items():
-                        if (
-                            x[0, pos] == MASK_ID
-                            and t - t0 < max_delay
-                            and check_neighbours(x, pos) - n0 < amount_to_wait_to_change
-                        ):
-                            held[0, pos] = True
-
-                    elegible = candidates * ~held
-
-                    if int(elegible.sum()) < blanks_per_step:
-                        elegible = candidates.clone()
-
-                    limit = 3 * blanks_per_step
-                    amount_probed = 0
-                    pick = torch.zeros_like(candidates)
-                    for pos in (
-                        p[0]
-                        .masked_fill(~elegible[0], -1e30)
-                        .argsort(descending=True)[: int(elegible.sum())]
-                        .tolist()
-                    ):
-                        if pick.sum() == blanks_per_step or amount_probed > limit:
-                            break
-                        if pos in flagged:  # already waited once: no second test
-                            pick[0, pos] = True
-                            continue
-                        amount_probed += 1
-                        total += 1
-                        if rethink(model, z, pos, args) <= 0:
-                            # this means that it survived the shake
-                            pick[0, pos] = True
-                        else:
-                            changed_n += 1
-                            flagged[pos] = (t, check_neighbours(x, pos))
-                            elegible[0, pos] = False
-
-                    missing = blanks_per_step - pick.sum()
-                    if missing >= 0:
-                        pick |= pick_top(p, elegible & ~pick, missing)
+                    changed_n += int(swapped.sum())
+                    total += int(pick.sum())
+                    print(f"swap {int(swapped.sum())} {int(pick.sum())}")
+                    y[0] = robust
             x[pick] = y[pick]
 
             if (
@@ -254,19 +201,6 @@ def generate(model, prompt, args):
                         # overwrite the token the model wants back least
                         worst = int(core_score.argmax())
                         x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
-                    else:
-                        theirs = tested[0].nonzero().flatten().tolist()
-                        mine = torch.tensor(
-                            [rethink(model, z, s, args) for s in theirs],
-                            device=device,
-                        )
-                        if core_score.std() > 1e-4 and mine.std() > 1e-4:
-                            agree.append(
-                                (
-                                    spearman(core_score, mine),
-                                    float(core_score.argmax() == mine.argmax()),
-                                )
-                            )
 
             t = t + 1
 
