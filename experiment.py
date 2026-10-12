@@ -16,6 +16,19 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # For LLaDA
 MASK_ID = 126336
 
+tokenizer = AutoTokenizer.from_pretrained(
+    "GSAI-ML/LLaDA-8B-Base", trust_remote_code=True
+)
+vocabulary_classes = None
+
+
+def build_classes(vocab_size):
+    names, cls = {}, []
+    for i in range(vocab_size):
+        key = tokenizer.decode([i]).strip().lower() if i < len(tokenizer) else f"{i}"
+        cls.append(names.setdefault(key, len(names)))
+    return torch.tensor(cls, device=device)
+
 
 def spearman(x, y):
     """calculate the separman correlation between two distributions."""
@@ -119,8 +132,44 @@ def pick_top(p, allowed, amount_to_pick):
     return selected
 
 
-def generate(model, prompt, args):
+def rethink(model, z, candidates, args):
+    """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
+    # save the original weights
+    weights = list(model.model.transformer.blocks[-1].parameters())
 
+    # get the top logits
+    global vocabulary_classes
+    if vocabulary_classes is None:
+        vocabulary_classes = build_classes(z.shape[-1])
+
+    values, i = z[0, candidates].topk(10)
+    choices = vocabulary_classes[i]
+
+    is_same = choices == choices[0]
+
+    if is_same.all():
+        return -1
+
+    rival = choices[~is_same][0]
+
+    m = torch.logsumexp(values[is_same], 0) - torch.logsumexp(
+        values[choices == rival], 0
+    )
+    grads = torch.autograd.grad(m, weights, retain_graph=True)
+
+    with torch.no_grad():
+        drop = sum(w.float().norm() * g.float().norm() for w, g in zip(weights, grads))
+        ratio = float(m / drop)
+        print(f"ratio {ratio}")
+        if args.epsilon * drop - m > 0:
+            rival_tok = int(i[choices == rival][0])
+            print(
+                f"flip {tokenizer.decode([int(i[0])])!r} -> {tokenizer.decode([rival_tok])!r} ratio {ratio:.5f}"
+            )
+        return float(args.epsilon * drop - m)
+
+
+def generate(model, prompt, args):
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
@@ -133,6 +182,7 @@ def generate(model, prompt, args):
     x[:, :prompt_length] = prompt
 
     changed_n, total, t = 0, 0, 0
+    streak, settle = {}, 2
     agree = []
 
     # number of blocks
@@ -152,8 +202,8 @@ def generate(model, prompt, args):
             candidates[:, :start_index], candidates[:, end_index:] = False, False
             blanks_per_step = -(-int(candidates.sum()) // (steps_per_block - step))
 
-            with torch.no_grad():
-                output = model(x, output_hidden_states=(args.method == "rethink"))
+            with torch.set_grad_enabled(args.method == "rethink"):
+                output = model(x)
                 z = output.logits
             y = z.detach().argmax(-1)
             p = z.detach().float().softmax(-1).max(-1).values
@@ -166,27 +216,48 @@ def generate(model, prompt, args):
                 pick = pick_top(margins, candidates, blanks_per_step)
             else:
                 pick = pick_top(p, candidates, blanks_per_step)
+                skipped = torch.zeros_like(candidates)
+
                 if (
                     args.method == "rethink"
                     and step < steps_per_block - 1
-                    and 0.25 < step / steps_per_block < 0.75
+                    and 0.25 < t / args.steps < 0.75
                 ):
-                    h = output.hidden_states[-1][0].float()
-                    W = model.model.transformer.ff_out.weight
-                    top = z[0].topk(2, -1)
-                    w = W[top.indices].float()
-                    worst = top.values.float() - args.epsilon * (
-                        w.abs() * h.abs()[:, None]
-                    ).sum(-1)
-                    robust = top.indices.gather(
-                        1, worst.argmax(-1, keepdim=True)
-                    ).squeeze(-1)
-                    swapped = pick[0] & (robust != y[0])
+                    for q, s in streak.items():
+                        if s < settle:
+                            skipped[0, q] = True
 
-                    changed_n += int(swapped.sum())
-                    total += int(pick.sum())
-                    print(f"swap {int(swapped.sum())} {int(pick.sum())}")
-                    y[0] = robust
+                    limit = 3 * blanks_per_step
+                    amount_probed = 0
+                    pick = torch.zeros_like(candidates)
+                    for pos in (
+                        p[0]
+                        .masked_fill(~candidates[0], -1e30)
+                        .argsort(descending=True)[: int(candidates.sum())]
+                        .tolist()
+                    ):
+                        if pick.sum() == blanks_per_step or amount_probed > limit:
+                            break
+                        amount_probed += 1
+                        total += 1
+                        if rethink(model, z, pos, args) > 0:
+                            # flipped
+                            changed_n += 1
+                            streak[pos] = 0
+                            skipped[0, pos] = True
+                        else:
+                            if pos in streak:
+                                streak[pos] += 1
+                            if streak.get(pos, settle) >= settle:
+                                pick[0, pos] = True
+
+                    held = sum(1 for s in streak.values() if s < settle)
+                    print(
+                        f"step t={t} probed={amount_probed} written={int(pick.sum())} held={held}"
+                    )
+                    missing = blanks_per_step - pick.sum()
+                    if missing >= 0:
+                        pick |= pick_top(p, candidates & ~pick & ~skipped, missing)
             x[pick] = y[pick]
 
             if (
