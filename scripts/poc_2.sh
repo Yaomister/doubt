@@ -13,12 +13,9 @@ source /home/yao.eric/doubt/.venv/bin/activate
 export HF_ALLOW_CODE_EVAL=1
 
 RUNS=(
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.01"
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.05"
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.1"
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.2"
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.5"
-    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=1"
+    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.0001"
+    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.0002"
+    "--tasks mbpp --num_fewshot 3 --limit 500 --model_args method=rethink,epsilon=0.0004"
 )
 
 NAME=doubt-poc_$SLURM_ARRAY_TASK_ID
