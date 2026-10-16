@@ -15,6 +15,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # For LLaDA
 MASK_ID = 126336
+DECAY = 0.95
+THRESH = 3
 
 tokenizer = AutoTokenizer.from_pretrained(
     "GSAI-ML/LLaDA-8B-Base", trust_remote_code=True
@@ -132,43 +134,6 @@ def pick_top(p, allowed, amount_to_pick):
     return selected
 
 
-def rethink(model, z, candidates, args):
-    """Nudge the weights in the direction that shrinks the distance between the first and second most confident logits."""
-    # save the original weights
-    weights = list(model.model.transformer.blocks[-1].parameters())
-
-    # get the top logits
-    global vocabulary_classes
-    if vocabulary_classes is None:
-        vocabulary_classes = build_classes(z.shape[-1])
-
-    values, i = z[0, candidates].topk(10)
-    choices = vocabulary_classes[i]
-
-    is_same = choices == choices[0]
-
-    if is_same.all():
-        return -1
-
-    rival = choices[~is_same][0]
-
-    m = torch.logsumexp(values[is_same], 0) - torch.logsumexp(
-        values[choices == rival], 0
-    )
-    grads = torch.autograd.grad(m, weights, retain_graph=True)
-
-    with torch.no_grad():
-        drop = sum(w.float().norm() * g.float().norm() for w, g in zip(weights, grads))
-        ratio = float(m / drop)
-        print(f"ratio {ratio}")
-        if args.epsilon * drop - m > 0:
-            rival_tok = int(i[choices == rival][0])
-            print(
-                f"flip {tokenizer.decode([int(i[0])])!r} -> {tokenizer.decode([rival_tok])!r} ratio {ratio:.5f}"
-            )
-        return float(args.epsilon * drop - m)
-
-
 def generate(model, prompt, args):
     os.makedirs(args.output, exist_ok=True)
 
@@ -195,6 +160,9 @@ def generate(model, prompt, args):
         start_index = prompt_length + args.block_length * block
         end_index = prompt_length + args.block_length * (block + 1)
 
+        scores = torch.zeros(args.block_length, device=device)
+        leaders = torch.full((args.block_length,), -1, dtype=torch.long, device=device)
+
         # repeat per decoding step
         for step in range(steps_per_block):
             # the ones we can unmask
@@ -208,57 +176,27 @@ def generate(model, prompt, args):
             y = z.detach().argmax(-1)
             p = z.detach().float().softmax(-1).max(-1).values
 
-            if args.method == "baseline":
-                pick = pick_top(p, candidates, blanks_per_step)
-            elif args.method == "margin":
-                top2 = z.detach().float().softmax(-1).topk(2, -1).values
-                margins = top2[..., 0] - top2[..., 1]
-                pick = pick_top(margins, candidates, blanks_per_step)
+            if args.method == "rethink":
+                probabilities = z[0, start_index:end_index].float().softmax(-1)
+                top = probabilities.softmax(-1)
+                gap = top.values[:, 0] - top.values[:, 1]
+                scores = torch.where(
+                    leaders == top.indices[:, 0], scores * DECAY + gap, gap
+                )
+                leaders = top.indices[:, 0]
+                ready = candidates[0, start_index:end_index] & (scores > THRESH)
+                if step == steps_per_block - 1:
+                    ready = candidates[0, start_index:end_index]
+                x[0, start_index:end_index][ready] = leaders[ready]
+
             else:
-                pick = pick_top(p, candidates, blanks_per_step)
-                skipped = torch.zeros_like(candidates)
-
-                if (
-                    args.method == "rethink"
-                    and step < steps_per_block - 1
-                    and 0.25 < t / args.steps < 0.75
-                ):
-                    for q, s in streak.items():
-                        if s < settle:
-                            skipped[0, q] = True
-
-                    limit = 3 * blanks_per_step
-                    amount_probed = 0
-                    pick = torch.zeros_like(candidates)
-                    for pos in (
-                        p[0]
-                        .masked_fill(~candidates[0], -1e30)
-                        .argsort(descending=True)[: int(candidates.sum())]
-                        .tolist()
-                    ):
-                        if pick.sum() == blanks_per_step or amount_probed > limit:
-                            break
-                        amount_probed += 1
-                        total += 1
-                        if rethink(model, z, pos, args) > 0:
-                            # flipped
-                            changed_n += 1
-                            streak[pos] = 0
-                            skipped[0, pos] = True
-                        else:
-                            if pos in streak:
-                                streak[pos] += 1
-                            if streak.get(pos, settle) >= settle:
-                                pick[0, pos] = True
-
-                    held = sum(1 for s in streak.values() if s < settle)
-                    print(
-                        f"step t={t} probed={amount_probed} written={int(pick.sum())} held={held}"
-                    )
-                    missing = blanks_per_step - pick.sum()
-                    if missing >= 0:
-                        pick |= pick_top(p, candidates & ~pick & ~skipped, missing)
-            x[pick] = y[pick]
+                if args.method == "baseline":
+                    pick = pick_top(p, candidates, blanks_per_step)
+                elif args.method == "margin":
+                    top2 = z.detach().float().softmax(-1).topk(2, -1).values
+                    margins = top2[..., 0] - top2[..., 1]
+                    pick = pick_top(margins, candidates, blanks_per_step)
+                x[pick] = y[pick]
 
             if (
                 args.method in ("core",)
