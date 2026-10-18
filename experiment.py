@@ -155,63 +155,63 @@ def generate(model, prompt, args):
     # number of steps per block
     steps_per_block = args.steps // blocks
 
-    for block in range(blocks):
-        # the start and end index of the block
-        start_index = prompt_length + args.block_length * block
-        end_index = prompt_length + args.block_length * (block + 1)
+    with torch.no_grad():
 
-        scores = torch.zeros(args.block_length, device=device)
-        leaders = torch.full((args.block_length,), -1, dtype=torch.long, device=device)
+        for block in range(blocks):
+            # the start and end index of the block
+            start_index = prompt_length + args.block_length * block
+            end_index = prompt_length + args.block_length * (block + 1)
 
-        # repeat per decoding step
-        for step in range(steps_per_block):
-            # the ones we can unmask
-            candidates = x == MASK_ID
-            candidates[:, :start_index], candidates[:, end_index:] = False, False
-            blanks_per_step = -(-int(candidates.sum()) // (steps_per_block - step))
+            scores = torch.zeros(args.block_length, device=device)
+            leaders = torch.full(
+                (args.block_length,), -1, dtype=torch.long, device=device
+            )
 
-            with torch.set_grad_enabled(args.method == "rethink"):
-                output = model(x)
-                z = output.logits
-            y = z.detach().argmax(-1)
-            p = z.detach().float().softmax(-1).max(-1).values
+            # repeat per decoding step
+            for step in range(steps_per_block):
+                # the ones we can unmask
+                candidates = x == MASK_ID
+                candidates[:, :start_index], candidates[:, end_index:] = False, False
+                blanks_per_step = -(-int(candidates.sum()) // (steps_per_block - step))
 
-            if args.method == "rethink":
-                probabilities = z[0, start_index:end_index].float().softmax(-1)
-                top = probabilities.topk(2, -1)
-                gap = top.values[:, 0] - top.values[:, 1]
-                scores = torch.where(
-                    leaders == top.indices[:, 0], scores * DECAY + gap, gap
-                )
-                leaders = top.indices[:, 0]
-                ready = candidates[0, start_index:end_index] & (scores > THRESH)
-                if step == steps_per_block - 1:
-                    ready = candidates[0, start_index:end_index]
-                x[0, start_index:end_index][ready] = leaders[ready]
+                with torch.set_grad_enabled(args.method == "rethink"):
+                    output = model(x)
+                    z = output.logits
+                y = z.detach().argmax(-1)
+                probabilities = z[0, start_index:end_index].detach().float().softmax(-1)
+                p = torch.full(x.shape, -float("inf"), device=device)
+                p[0, start_index:end_index] = probabilities.max(-1).values
 
-            else:
-                if args.method == "baseline":
+                if args.method == "rethink":
+                    top = probabilities.topk(2, -1)
+                    gap = top.values[:, 0] - top.values[:, 1]
+                    scores = torch.where(
+                        leaders == top.indices[:, 0], scores * DECAY + gap, gap
+                    )
+                    leaders = top.indices[:, 0]
+                    ready = candidates[0, start_index:end_index] & (scores > THRESH)
+                    if step == steps_per_block - 1:
+                        ready = candidates[0, start_index:end_index]
+                    x[0, start_index:end_index][ready] = leaders[ready]
+
+                else:
                     pick = pick_top(p, candidates, blanks_per_step)
-                elif args.method == "margin":
-                    top2 = z.detach().float().softmax(-1).topk(2, -1).values
-                    margins = top2[..., 0] - top2[..., 1]
-                    pick = pick_top(margins, candidates, blanks_per_step)
-                x[pick] = y[pick]
+                    x[pick] = y[pick]
 
-            if (
-                args.method in ("core",)
-                and t % 8 == 0
-                and 0.25 <= t / args.steps < 0.75
-            ):
-                out = core(model, x, z, prompt_length, args)
-                if out:
-                    tested, core_score, replacement = out
-                    if args.method == "core":
-                        # overwrite the token the model wants back least
-                        worst = int(core_score.argmax())
-                        x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
+                if (
+                    args.method in ("core",)
+                    and t % 8 == 0
+                    and 0.25 <= t / args.steps < 0.75
+                ):
+                    out = core(model, x, z, prompt_length, args)
+                    if out:
+                        tested, core_score, replacement = out
+                        if args.method == "core":
+                            # overwrite the token the model wants back least
+                            worst = int(core_score.argmax())
+                            x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
 
-            t = t + 1
+                t = t + 1
 
     return x, changed_n, total, agree
 
