@@ -178,7 +178,7 @@ def generate(model, prompt, args):
 
             if args.method == "rethink":
                 probabilities = z[0, start_index:end_index].float().softmax(-1)
-                top = probabilities.softmax(-1)
+                top = probabilities.topk(2, -1)
                 gap = top.values[:, 0] - top.values[:, 1]
                 scores = torch.where(
                     leaders == top.indices[:, 0], scores * DECAY + gap, gap
