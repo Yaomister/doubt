@@ -7,10 +7,6 @@ from shared import datasets_lookup
 from datasets import load_dataset
 from transformers import AutoModel, AutoTokenizer
 
-"""
-DOUBT: Directed Opposition in the denoising loop of diffusion language models.
-"""
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # For LLaDA
@@ -21,48 +17,9 @@ THRESH = 3
 tokenizer = AutoTokenizer.from_pretrained(
     "GSAI-ML/LLaDA-8B-Base", trust_remote_code=True
 )
-vocabulary_classes = None
 
 
-def build_classes(vocab_size):
-    names, cls = {}, []
-    for i in range(vocab_size):
-        key = tokenizer.decode([i]).strip().lower() if i < len(tokenizer) else f"{i}"
-        cls.append(names.setdefault(key, len(names)))
-    return torch.tensor(cls, device=device)
-
-
-def spearman(x, y):
-    """calculate the separman correlation between two distributions."""
-    n = len(x)
-    d = x.argsort().argsort().float() - y.argsort().argsort().float()
-    return float(1 - 6 * d.pow(2).sum() / (n * (n**2 - 1)))
-
-
-def _get_args():
-    """Arguments for the experiment."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model", type=str, required=False, default="GSAI-ML/LLaDA-8B-Base"
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        required=False,
-        default="rethink",
-        choices=["baseline", "rethink", "margin", "core"],
-    )
-    parser.add_argument("--epsilon", type=float, required=False, default=0.005)
-    parser.add_argument("--random", action="store_true", required=False, default=False)
-    parser.add_argument("--output", required=False, default="./results")
-    parser.add_argument("--dataset", required=False, default="gsm8k")
-    parser.add_argument("--smoke-test", required=False, action="store_true")
-    parser.add_argument("--steps", type=int, default=128)
-
-    return parser.parse_args()
-
-
-def core(model, x, z, prompt_length, args):
+def core(model, x, z, prompt_length):
     """CoRE."""
 
     # the positions that are already unmasked that we can pick from
@@ -107,22 +64,6 @@ def core(model, x, z, prompt_length, args):
     )
 
 
-def _load_model(args):
-    """Load the model."""
-    model = AutoModel.from_pretrained(
-        args.model, trust_remote_code=True, dtype=torch.bfloat16, device_map="auto"
-    )
-
-    # freeze the model
-    model.requires_grad_(False)
-    for w in model.model.transformer.blocks[-1].parameters():
-        w.requires_grad_(True)
-    model.eval()
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    return model, tokenizer
-
-
 def pick_top(p, allowed, amount_to_pick):
     """pick the top k values form the list of allowed positions."""
     amount_to_pick = min(int(allowed.sum()), int(amount_to_pick))
@@ -135,6 +76,7 @@ def pick_top(p, allowed, amount_to_pick):
 
 
 def generate(model, prompt, args):
+    """Generate tokens."""
     os.makedirs(args.output, exist_ok=True)
 
     prompt_length = prompt.shape[1]
@@ -145,10 +87,6 @@ def generate(model, prompt, args):
         device=device,
     )
     x[:, :prompt_length] = prompt
-
-    changed_n, total, t = 0, 0, 0
-    streak, settle = {}, 2
-    agree = []
 
     # number of blocks
     blocks = args.generation_length // args.block_length
@@ -199,11 +137,11 @@ def generate(model, prompt, args):
                     x[pick] = y[pick]
 
                 if (
-                    args.method in ("core",)
+                    "core" in args.method
                     and t % 8 == 0
                     and 0.25 <= t / args.steps < 0.75
                 ):
-                    out = core(model, x, z, prompt_length, args)
+                    out = core(model, x, z, prompt_length)
                     if out:
                         tested, core_score, replacement = out
                         if args.method == "core":
@@ -213,104 +151,4 @@ def generate(model, prompt, args):
 
                 t = t + 1
 
-    return x, changed_n, total, agree
-
-
-def prepare_question(dataset_name, row):
-    if dataset_name == "gsm8k":
-        question = row["question"]
-    elif dataset_name == "math":
-        question = row["problem"]
-    elif dataset_name == "humaneval":
-        question = f"Complete this function. Return the full function in a ```python block.\n\n```python\n{row['prompt']}```"
-    elif dataset_name == "mbpp":
-        question = (
-            "You are an expert Python programmer, and here is your task: "
-            + row["text"]
-            + "\nYour code should pass these tests:\n\n"
-            + "\n".join(row["test_list"])
-        )
-    else:
-        raise ValueError()
-
-    formatted = tokenizer.apply_chat_template(
-        [{"role": "user", "content": question}],
-        add_generation_prompt=True,
-        tokenize=False,
-    )
-    token_ids = tokenizer(
-        formatted, add_special_tokens=False, return_tensors="pt"
-    ).input_ids.to(device)
-
-    return token_ids
-
-
-if __name__ == "__main__":
-    args = _get_args()
-    model, tokenizer = _load_model(args)
-
-    records = []
-
-    # running a smaller test to make sure everything works
-    if args.smoke_test:
-        dataset = load_dataset("openai/gsm8k", "main", split="test")
-        amount_question = 50
-        hits = changes = candidates = 0
-        rho = []
-        for i in range(amount_question):
-            answer = dataset[i]["answer"].split("####")[-1].strip().replace(",", "")
-            input = prepare_question("gsm8k", dataset[i])
-
-            out, f, c, ag = generate(model, input)
-
-            # check if answers match
-            text = tokenizer.decode(out[0, input.shape[1] :], skip_special_tokens=True)
-            nums = re.findall(
-                r"-?\d+",
-                (text.split("####")[-1] if "####" in text else text).replace(",", ""),
-            )
-
-            hits += bool(nums) and nums[0 if "####" in text else -1] == answer
-            changes, candidates, rho = changes + f, candidates + c, rho + ag
-
-            msg = f"{i + 1}/{amount_question}  acc={hits / (i + 1):.3f}"
-            if candidates:
-                msg += f"fell={changes / max(candidates, 1):.2f}"
-            if rho:
-                msg += f"rho={sum(r for r, _ in rho) / len(rho):+.2f}  same={sum(s for _, s in rho) / len(rho):.2f}"
-
-            print(msg, flush=True)
-            records.append(
-                {
-                    "i": i,
-                    "correct": bool(nums)
-                    and nums[0 if "####" in text else -1] == answer,
-                    "acc": hits / (i + 1),
-                    "deferral": changes / candidates if candidates else None,
-                    "rho": sum(r for r, _ in rho) / len(rho) if rho else None,
-                }
-            )
-
-            with open(f"{args.output}/smoke_test.json", "w") as fh:
-                json.dump({"args": vars(args), "records": records}, fh, indent=1)
-    else:
-        dataset = load_dataset(
-            datasets_lookup[args.dataset],
-            "main" if args.dataset == "gsm8k" else None,
-            split="test",
-        )
-
-        for i in range(len(dataset)):
-            input = prepare_question(args.dataset, dataset[i])
-
-            res, changed, total, _ = generate(model, input)
-            text = tokenizer.decode(res[0, input.shape[1] :], skip_special_tokens=True)
-            records.append(
-                {"i": i, "output": text, "deferred": changed, "total": total}
-            )
-
-            with open(
-                f"{args.output}/results_{args.model.split('/')[-1]}_{args.method}_{args.epsilon}_{args.dataset}_steps{args.steps}{'_random' if args.random else ''}.json",
-                "w",
-            ) as f:
-                json.dump(records, f)
+    return x

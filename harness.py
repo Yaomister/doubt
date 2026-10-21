@@ -4,10 +4,8 @@ from lm_eval.api.model import LM
 from types import SimpleNamespace
 from experiment import generate, device
 from lm_eval.__main__ import cli_evaluate
-from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
 from transformers import AutoModel, AutoTokenizer
-from experiment import generate, device
 
 
 @register_model("doubt")
