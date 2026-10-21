@@ -266,7 +266,7 @@ def generate(model, prompt, args):
                     out = core(model, x, z, prompt_length, args)
                     if out:
                         tested, core_score, replacement = out
-                        if args.method == "core":
+                        if args.apply_core:
                             # overwrite the token the model wants back least
                             worst = int(core_score.argmax())
                             x[0, int(tested[0].nonzero()[worst])] = replacement[worst]
